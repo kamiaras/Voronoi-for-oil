@@ -2,7 +2,6 @@ import random
 import numpy as np
 from shapely.geometry import Point
 from shapely.ops import nearest_points
-from scipy.optimize import differential_evolution as scipy_de
 
 def differential_evolution_custom(loss, bounds, polygon, A_min, params):
     """
@@ -289,3 +288,196 @@ def ga_solver(loss, bounds, polygon, A_min, params):
 
     best = tools.selBest(pop, 1)[0]
     return list(best), best.fitness.values[0]
+
+
+
+
+
+def spsa_solver(loss, bounds, polygon, A_min, params):
+    """
+    SPSA-based zero-order solver with random initialization and multiple restarts,
+    using one-sided directional approximation and normalization:
+        ghat = normalize( (f_plus - f_x) * (x_plus - x) )
+    """
+    seed = params.get("seed", None)
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+    else:
+        random.seed(None)
+
+    # SPSA hyperparameters
+    a = params.get("a", 0.1)
+    c = params.get("c", 0.1)
+    alpha = params.get("alpha", 0.602)
+    gamma = params.get("gamma", 0.101)
+    maxiter = params.get("maxiter", 100)
+    restarts = params.get("restarts", 5)
+
+    dim = len(bounds)
+    # bounds assumed pairwise: [(minx,maxx),(miny,maxy)] * n
+    minx, maxx = bounds[0]
+    miny, maxy = bounds[1]
+    n = dim // 2
+
+    best_global = None
+    best_global_f = np.inf
+
+    def project(x_vec):
+        proj = []
+        for i in range(n):
+            xi, yi = x_vec[2*i], x_vec[2*i+1]
+            pt = Point(xi, yi)
+            if not polygon.contains(pt):
+                p = nearest_points(polygon, pt)[0]
+                xi, yi = p.x, p.y
+            proj.extend([xi, yi])
+        return np.array(proj)
+
+    for _ in range(restarts):
+        # random initialization inside polygon
+        added = []
+        while len(added) < n:
+            x0 = random.uniform(minx, maxx)
+            y0 = random.uniform(miny, maxy)
+            if polygon.contains(Point(x0, y0)):
+                added.append((x0, y0))
+        x = np.array([coord for pt in added for coord in pt])
+        x = project(x)
+
+        # initial loss
+        f_x = loss(x)
+        best, best_f = x.copy(), f_x
+
+        if best_f < best_global_f:
+            best_global, best_global_f = best.copy(), best_f
+        if -best_global_f >= A_min:
+            return best_global, best_global_f
+
+        for k in range(1, maxiter + 1):
+            ak = a / (k ** alpha)
+            ck = c / (k ** gamma)
+
+            # generate perturbation ±1
+            delta = np.random.choice([-1, 1], size=dim)
+
+            # forward evaluation
+            x_plus = project(x + ck * delta)
+            f_plus = loss(x_plus)
+
+            # one-sided directional approximation
+            diff = x_plus - x
+            v = (f_plus - f_x) * diff
+            norm_v = np.linalg.norm(v)
+            if norm_v > 0:
+                ghat = v / norm_v
+            else:
+                ghat = np.zeros(dim)
+
+            # update
+            x = project(x - ak * ghat)
+            f_x = loss(x)
+
+            if f_x < best_f:
+                best, best_f = x.copy(), f_x
+                if best_f < best_global_f:
+                    best_global, best_global_f = best.copy(), best_f
+                if -best_global_f >= A_min:
+                    return best_global, best_global_f
+
+    return best_global, best_global_f
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import voronoi_utils as vu
+
+def lloyd_cvt_solver(loss, bounds, polygon, A_min, params):
+    """
+    Lloyd–CVT solver with multiple random initializations.
+    Uses averaging with centroids: new_added = 0.5*(centroid + old point).
+    """
+    import random, numpy as np
+    from shapely.geometry import Point
+    import voronoi_utils as vu
+
+    seed = params.get("seed", None)
+    restarts = params.get("restarts", 1)
+    n = len(bounds) // 2
+
+    best_x_flat = None
+    best_loss = float('inf')
+
+    minx, maxx = bounds[0]
+    miny, maxy = bounds[1]
+
+    for r in range(restarts):
+        # seed each restart
+        if seed is not None:
+            random.seed(seed + r)
+            np.random.seed(seed + r)
+        else:
+            random.seed(None)
+
+        # initialize added points inside polygon
+        added = []
+        while len(added) < n:
+            x = random.uniform(minx, maxx)
+            y = random.uniform(miny, maxy)
+            if polygon.contains(Point(x, y)):
+                added.append((x, y))
+
+        current_loss = None
+
+        # Lloyd iterations
+        for _ in range(params["maxiter"]):
+            all_pts = params["fixed"] + added
+            cells, _ = vu.get_voronoi_cells_and_areas(all_pts, polygon)
+            added_cells = cells[-n:]
+            # compute centroids
+            centroids = [tuple(cell.centroid.coords)[0] for cell in added_cells]
+            # average with previous positions
+            added = [((added[i][0] + centroids[i][0]) * 0.5,
+                      (added[i][1] + centroids[i][1]) * 0.5)
+                     for i in range(n)]
+
+            # flatten and evaluate loss
+            x_flat = np.array([coord for pt in added for coord in pt])
+            current_loss = loss(x_flat)
+
+            # early exit if feasible
+            if -current_loss >= A_min:
+                break
+
+        # record best across restarts
+        if current_loss is not None and current_loss < best_loss:
+            best_loss = current_loss
+            best_x_flat = x_flat.copy()
+
+    return best_x_flat, best_loss
+
