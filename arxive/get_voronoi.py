@@ -4,20 +4,24 @@
 Module: get_voronoi
 
 Compute and clip Voronoi cells for named points within a given polygon,
-returning each point’s name, its cell, and the cell’s area.
+returning each point’s name, its cell, and the cell’s area, plus
+the list of pairwise point-to-point distances.
 """
 
 from shapely.geometry import MultiPoint
 import shapely.geometry as geom
+import itertools
+import math
 
 __all__ = ["get_voronoi_cells_and_areas"]
 
 
 def get_voronoi_cells_and_areas(points, polygon):
     """
-    Given a list of named points and a Shapely polygon, compute the Voronoi
-    diagram, clip each cell to `polygon`, and return a list of
-    (name, cell_polygon, area).
+    Given a list of named points and a Shapely polygon, compute:
+      1) The Voronoi diagram clipped to `polygon`, returning a list of
+         (name, cell_polygon, area)
+      2) The list of distances between every pair of points.
 
     Parameters:
     -----------
@@ -28,22 +32,31 @@ def get_voronoi_cells_and_areas(points, polygon):
 
     Returns:
     --------
-    results : list of tuples
+    cells_and_areas : list of tuples
         Each element is (name, shapely.geometry.Polygon cell, float area).
+    distances : list of tuples
+        Each element is (name1, name2, float distance).
     """
     # Unzip names and coordinates
     names, coords = zip(*points)
+
+    # Compute all pairwise distances
+    distances = []
+    for (n1, (x1, y1)), (n2, (x2, y2)) in itertools.combinations(points, 2):
+        d = math.hypot(x2 - x1, y2 - y1)
+        distances.append((n1, n2, d))
+
     multipoint = MultiPoint(coords)
 
     # Try Shapely 2.0+ voronoi_diagram
     try:
         from shapely.ops import voronoi_diagram
         vor = voronoi_diagram(multipoint, envelope=polygon)
-        results = []
+        cells_and_areas = []
         for name, region in zip(names, vor.geoms):
             cell = region.intersection(polygon)
-            results.append((name, cell, cell.area))
-        return results
+            cells_and_areas.append((name, cell, cell.area))
+        return cells_and_areas, distances
 
     except ImportError:
         # SciPy fallback
@@ -57,7 +70,7 @@ def get_voronoi_cells_and_areas(points, polygon):
             (maxx, maxy), (maxx, miny)
         ])
 
-        results = []
+        cells_and_areas = []
         for idx, name in enumerate(names):
             region_index = vor.point_region[idx]
             vertex_indices = vor.regions[region_index]
@@ -70,9 +83,9 @@ def get_voronoi_cells_and_areas(points, polygon):
                 cell_poly = geom.Polygon(pts)
 
             cell = cell_poly.intersection(polygon)
-            results.append((name, cell, cell.area))
+            cells_and_areas.append((name, cell, cell.area))
 
-        return results
+        return cells_and_areas, distances
 
 
 if __name__ == "__main__":
@@ -89,6 +102,12 @@ if __name__ == "__main__":
         ("C03", (0.4, 0.8)),
     ]
 
-    cells = get_voronoi_cells_and_areas(pts, poly)
+    cells, dists = get_voronoi_cells_and_areas(pts, poly)
+
+    print("Voronoi cells & areas:")
     for name, cell, area in cells:
-        print(f"{name}: area = {area:.4f}")
+        print(f"  {name}: area = {area:.4f}")
+
+    print("\nPairwise distances:")
+    for n1, n2, dist in dists:
+        print(f"  {n1} ↔ {n2}: {dist:.4f}")
